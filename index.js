@@ -13,6 +13,7 @@ mongoClient.connect()
         client=>{
             mongoDB = client.db();
             console.log('Conected to Mongo Atlas');
+            createWatchers();
         }
     ).catch(
         err=>{
@@ -34,6 +35,69 @@ async function requestTemplateHandler (ws,request) {
     ws.objSend(response);
 }
 */
+
+async function sendUpdateNotification (updateObject) {
+
+    const chats = mongoDB.collection('chats');
+    const users = mongoDB.collection('users');
+
+    var peers = [];
+
+    const update = {
+        type: updateObject.ns.coll,
+        doc: updateObject.fullDocument,
+    };
+
+    const destination = updateObject.fullDocument.destination;
+    const destinationChat = updateObject.fullDocument.chat;
+    const destType = updateObject.fullDocument.destType;
+    const sender = updateObject.fullDocument.user;
+    const chat = await chats.findOne({id: destinationChat});
+
+    switch (destType) {
+        case 'm2m':
+            peers = [...chat.peers, chat.owner];
+            break;
+        case 'p2p':
+            peers = [sender, chat.owner, destination];
+            break;
+        default:
+            console.error('*** Unknown message destination type on push update');
+    }
+
+    const involvedSessions = new Set()
+
+    sessions.forEach(
+        (id,ws)=>{
+            if ( peers.includes(id) ) {
+                involvedSessions.add( ws );
+            }
+        }
+    )
+
+    const message = {
+        code: 'updates',
+        obj: update,
+    }
+
+    involvedSessions.forEach(
+        (ws)=>{
+            ws.objSend(message);
+        }
+    )
+
+}
+
+async function createWatchers () {
+    console.log('Creating watchers');
+    try {
+        const messages = mongoDB.collection('messages');
+        const messagesUpdates = messages.watch();
+        messagesUpdates.on('change',(data)=>sendUpdateNotification(data));
+    } catch (err) {
+        console.error(err.message)
+    }
+}
 
 async function loginHandler (ws,obj,code) {
     console.log('-> Logging on');
@@ -90,25 +154,23 @@ async function signonHandler (ws,obj,code) {
             owner: obj.nameHash,
             type: 'p2p',
             peers: [],
+            messages: [],
             peerRequests: [],
             bannedIds: [],
+            isPublic: true,
         };
         const user = {
             nameHash: obj.nameHash,
             chats: [chat.id],
         };
-        chats.insertOne(chat);
-        users.insertOne(user);
+        await chats.insertOne(chat);
+        await users.insertOne(user);
         response = { 
             code,
             obj: {
                 message: {
                     chats: [
-                        {
-                            id: user.chats,
-                            messages: [],
-                            type: 'p2p',
-                        },
+                        chat,
                     ],
                 },
                 ok: true,
@@ -138,6 +200,114 @@ async function challengeHandler (ws,obj,code) {
     ws.objSend(response);
 }
 
+
+async function chatAccessHandler (ws,obj,code) {
+
+    console.log('-> Chat Access request');
+
+    try {
+
+        if ( ! sessions.has(ws) ) {
+            console.log('  |-> User is not identified.');
+            response = {
+                code,
+                obj: {
+                    message: 'You are not identified',
+                    ok: false,
+                }
+            };
+            ws.objSend(response);
+            return;
+        };
+
+        const chats = mongoDB.collection('chats');
+        const messages = mongoDB.collection('messages');
+        var response = {code}
+        const nameHash = sessions.get(ws);
+
+        console.log(`  |-> nameHash: ${nameHash}`);
+
+        const chat = await chats.findOne({id: obj.chat},{projection: {_id: 0}});
+
+        if ( chat === null ) {
+            console.log(`  |-> Nonexistent chat`);
+            response.obj = {
+                message: `unknown`,
+                ok: true,
+            };
+            ws.objSend(response);
+            return;
+        };
+
+        console.log(`  |-> chat: ${obj.chat}`);
+
+        if ( chat.bannedIds.includes(nameHash) ) {
+            console.log(`  |-> Banned id`);
+            response.obj = {
+                message: `You are banned in ${obj.chat}.`,
+                ok: false,
+            };
+            ws.objSend(response);
+            return;
+        }
+
+        if ( chat.owner === nameHash || chat.peers.includes(nameHash)) {
+            response.obj = {
+                message: `granted`,
+                ok: true,
+            };
+            ws.objSend(response);
+            return;
+        } else if (chat.isPublic === true) {
+            const peers = [...chat.peers, nameHash];
+            const update = await chats.updateOne({id:chat.id},{ $set:{peers} });
+            if ( update.result.nModified === 1 ) {
+                response.obj = {
+                    message: `granted`,
+                    ok: true,
+                };
+                ws.objSend(response);
+                console.log(`  |-> Access granted to public group.`);
+                return;
+            }
+        } else {
+            if ( ! chat.peerRequests.includes(nameHash) ) {
+                const peerRequests = [...chat.peerRequests, nameHash];
+                const update = await chats.updateOne({id:chat.id},{ $set:{peerRequests} });
+                if ( update.result.nModified === 1 ) {
+                    console.log(`  |-> Access request added. Await.`);
+                }
+            } else {
+                console.log(`  |-> Allready in access requests list.`);
+            };
+            response.obj = {
+                message: `await`,
+                ok: true,
+            };
+            ws.objSend(response);
+            return;
+        }
+    } catch (err) {
+
+        console.error(err);
+
+        response = { 
+            code,
+            obj: {
+                message: err.message,
+                ok: false,
+            },
+        }
+    }
+
+    response.obj = {
+        message: '...',
+        ok: true,
+    };
+    ws.objSend(response);
+}
+
+
 async function getHandler (ws,obj,code) {
 
     var response = {};
@@ -153,7 +323,7 @@ async function getHandler (ws,obj,code) {
         response = {
             code,
             obj: {
-                messeage: 'You are not identified',
+                message: 'You are not identified',
                 ok: false,
             }
         };
@@ -168,27 +338,38 @@ async function getHandler (ws,obj,code) {
         const users = mongoDB.collection('users');
         const chats = mongoDB.collection('chats');
         const messages = mongoDB.collection('messages');
-        
-        user = await users.findOne({nameHash},{projection: {chats: 1, _id: 0}});
-        userChatsPromises = user.chats.map(
-            async chatId => {
-                const chat = await chats.findOne({id: chatId},{projection: {type: 1, _id: 0, }})
-                const chatType = chat.type;
-                const chatMessages = await messages.find({chat: chatId},{projection: {user:1, time: 1, content: 1, type: 1, _id: 0}}).toArray();
-                return {
-                    id: chatId,
-                    messages: chatMessages,
-                    type: chatType,
-                };
-            }
 
+        //user = await users.findOne({nameHash},{projection: {_id: 0}});
+        const ownedChats = await chats.find({owner: nameHash}).toArray();
+        const authorizedChats = await chats.find({peers: nameHash}).toArray();
+        const userChats = [...ownedChats, ...authorizedChats];
+        userChatsPromises = userChats.map(
+            async chat => {
+                var chatMessages;
+                switch (chat.type) {
+                    case 'p2p':
+                        if (chat.owner === nameHash) {
+                            chatMessages = await messages.find({chat: chat.id},{projection: {_id: 0}}).toArray();
+                        } else {
+                            chatMessages = await messages.find({chat: chat.id, $or: [{destination: nameHash}, {user: nameHash}]},{projection: {_id: 0}}).toArray();
+                        }
+                        break;
+                    case 'm2m':
+                        chatMessages = await messages.find({chat: chat.id},{projection: {_id: 0}}).toArray();
+                        break;
+                    default:
+                        break;
+                }
+                chat.messages = chatMessages;
+                return chat;
+            }
         );
-        userChats = await Promise.all(userChatsPromises);
+        const chatsAndMessages = [...await Promise.all(userChatsPromises)];
 
         response = {
             code,
             obj: {
-                message: userChats,
+                message: chatsAndMessages,
                 ok: true,
             }
         };
@@ -209,6 +390,46 @@ async function getHandler (ws,obj,code) {
     ws.objSend(response);
 };
 
+async function putHandler (ws,obj,code) {
+
+    console.log('-> Put');
+
+    var response = {};
+
+    try {
+
+        const messages = mongoDB.collection('messages');
+
+        const document = {...obj.msg}
+        document.user = sessions.get(ws);
+        document.time = Date.now();
+
+        messages.insertOne(document);
+
+        response = {
+            message: null,
+            ok: true,
+        };
+
+        console.log(` |-> ${document.chat}`);
+        console.log(` |-> ${document.user}`);
+
+    } catch (err) {
+        
+        console.error(err)
+        
+        response = { 
+            code,
+            obj: {
+                message: err.message,
+                ok: false,
+            },
+        }
+    }
+
+    ws.objSend({ code, response });
+}
+
 async function logoutHandler (ws,request,code) {
     console.log('-> Logout');
     const object = {
@@ -225,16 +446,18 @@ const messageHandlers = {
     signon: signonHandler,
     challenge: challengeHandler,
     login: loginHandler,
+    chatAccess: chatAccessHandler,
     get: getHandler,
-    put: (ws,obj,code) => {
-        console.log('-> Put');
-    },
+    put: putHandler,
     logout: logoutHandler,
 }
 
 const expressApp = express();
 
-expressApp.use(express.static(__dirname + '/public'));
+expressApp.use('/static/',express.static(__dirname + '/public/static/'));
+expressApp.use('/css/',express.static(__dirname + '/public/css/'));
+expressApp.use('/fonts/',express.static(__dirname + '/public/fonts/'));
+expressApp.use('/js/',express.static(__dirname + '/public/js/'));
 
 const httpServer = http.createServer(expressApp);
 const webSocketsServer = new webSockets.Server({ server: httpServer });
@@ -302,6 +525,10 @@ webSocketsServer.on('connection', async (ws) => {
     });
 
 })
+
+expressApp.get(/\/.*/, function(req, res) {
+    res.sendFile(__dirname + '/public/index.html');
+});
 
 httpServer.listen( PORT , ()=>{
     const connection = httpServer.address()
