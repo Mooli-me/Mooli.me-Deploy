@@ -526,8 +526,17 @@ webSocketsServer.on('connection', async (ws) => {
 
 })
 
-expressApp.get(/\/.*/, function(req, res) {
+expressApp.get(/\//, function(req, res) {
     res.sendFile(__dirname + '/public/index.html');
+});
+expressApp.get(/\/index\.html/, function(req, res) {
+    res.sendFile(__dirname + '/public/index.html');
+});
+expressApp.get(/\/manifest\.json/, function(req, res) {
+    res.sendFile(__dirname + '/public/manifest.json');
+});
+expressApp.get(/\/service-worker\.js/, function(req, res) {
+    res.sendFile(__dirname + '/public/service-worker.js');
 });
 
 httpServer.listen( PORT , ()=>{
