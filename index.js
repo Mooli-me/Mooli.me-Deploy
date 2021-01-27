@@ -526,16 +526,18 @@ webSocketsServer.on('connection', async (ws) => {
 
 })
 
-expressApp.get(/\//, function(req, res) {
+expressApp.get('/', function(req, res) {
     res.sendFile(__dirname + '/public/index.html');
 });
-expressApp.get(/\/index\.html/, function(req, res) {
+expressApp.get('/index.html', function(req, res) {
     res.sendFile(__dirname + '/public/index.html');
 });
-expressApp.get(/\/manifest\.json/, function(req, res) {
+expressApp.get('/manifest.json', function(req, res) {
+    console.log('/manifest.json')
     res.sendFile(__dirname + '/public/manifest.json');
 });
-expressApp.get(/\/service-worker\.js/, function(req, res) {
+expressApp.get('/service-worker.js', function(req, res) {
+    console.log('/service-worker.js')
     res.sendFile(__dirname + '/public/service-worker.js');
 });
 
